@@ -146,7 +146,7 @@ def generate_canonical(args):
     canonical_embeddings = class_sums / class_counts
     
     # 7. Save Results
-    output_path = "canonical_embeddings.pt"
+    output_path = "models/canonical_embeddings.pt"
     torch.save(canonical_embeddings.cpu(), output_path)
     print(f"Saved canonical structural embeddings to {output_path}")
     print(f"Shape: {canonical_embeddings.shape}")
@@ -154,7 +154,7 @@ def generate_canonical(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate canonical structural embeddings from trained model.")
     parser.add_argument('--data_dir', type=str, default='data/casia', help='Root directory of the dataset')
-    parser.add_argument('--model_path', type=str, default='best_model.pth', help='Path to the trained model checkpoint (.pth)')
+    parser.add_argument('--model_path', type=str, default='models/best_model.pth', help='Path to the trained model checkpoint (.pth)')
     parser.add_argument('--batch_size', type=int, default=256, help='Inference batch size')
     args = parser.parse_args()
     

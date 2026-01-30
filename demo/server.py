@@ -14,8 +14,8 @@ app = Flask(__name__)
 
 # Config
 DATA_DIR = os.path.join('..', 'data', 'casia')
-MODEL_PATH = os.path.join('..', 'best_model.pth') 
-CANONICAL_PATH = os.path.join('..', 'canonical_embeddings.pt')
+MODEL_PATH = os.path.join('..', 'models', 'best_model.pth') 
+CANONICAL_PATH = os.path.join('..', 'models', 'canonical_embeddings.pt')
 MAP_PATH = os.path.join(DATA_DIR, 'processed', 'class_map.pt')
 
 # Globals

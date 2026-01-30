@@ -113,12 +113,12 @@ def run_lottery(args):
     Main execution loop for LTH.
     """
     # Prerequisites Checks
-    if not os.path.exists("init_model.pth"):
-        print("Error: 'init_model.pth' missing. Train the base model first!")
+    if not os.path.exists("models/init_model.pth"):
+        print("Error: 'models/init_model.pth' missing. Train the base model first!")
         return
         
-    if not os.path.exists("best_model.pth"):
-        print("Error: 'best_model.pth' missing. Train the base model first!")
+    if not os.path.exists("models/best_model.pth"):
+        print("Error: 'models/best_model.pth' missing. Train the base model first!")
         return
 
     # Hyperparameters
@@ -136,11 +136,11 @@ def run_lottery(args):
     
     # 2. Load the Reference Model (The Teacher/Baseline)
     print("Loading best model to identify winning tickets...")
-    best_state = torch.load("best_model.pth", map_location='cpu')
+    best_state = torch.load("models/best_model.pth", map_location='cpu')
     model.load_state_dict(best_state)
     
     # 3. Load Initialization (For Rewinding)
-    init_state = torch.load("init_model.pth", map_location='cpu')
+    init_state = torch.load("models/init_model.pth", map_location='cpu')
 
     # 4. Pruning Loop
     for round_idx in range(ROUNDS):
@@ -154,7 +154,7 @@ def run_lottery(args):
         
         # C. Save Intermediate Checkpoint
         # This checkpoint has the sparse mask active and weights set to Init values.
-        ckpt_name = f"lottery_round_{round_idx+1}.pth"
+        ckpt_name = f"models/lottery_round_{round_idx+1}.pth"
         torch.save(model.state_dict(), ckpt_name)
         
         # D. Retrain
@@ -179,7 +179,7 @@ def run_lottery(args):
         
         # Ensure model has correct structure before loading sparse dict
         # We re-apply identity masks to all pruned layers
-        best_path = "best_model.pth"
+        best_path = "models/best_model.pth"
         if os.path.exists(best_path):
              state_dict = torch.load(best_path, map_location='cpu')
              
