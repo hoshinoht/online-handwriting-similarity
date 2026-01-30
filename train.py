@@ -1,175 +1,323 @@
+"""
+Script: train.py
+Description:
+    Main training script for the Online Handwriting Similarity project.
+    Handles data loading, model initialization, training loops, validation, 
+    and checkpoint saving. Supports resumed training (Stage 2/3) and 
+    Structural Loss via canonical embeddings.
+
+Usage:
+    python train.py --data_dir data/casia --batch_size 256 --epochs 15
+"""
+
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, ConcatDataset
 import numpy as np
 import os
 import argparse
+import glob
+from tqdm import tqdm
+
+# AMP Gradient Scaler Import
+try:
+    from torch.amp import GradScaler, autocast
+except ImportError:
+    from torch.cuda.amp import GradScaler, autocast
 
 from src.model import HandwritingModel
 from src.loss import CombinedLoss
 from src.preprocess import preprocess_stroke
-from src.dataset import CASIADataset
+from src.dataset import CASIADataset, CachedDataset
 
-# dataset directories for casia
-train_directories = [
-  "Pot1.0Train",
-  "Pot1.2Train",
-]
+# --- Configuration Constants ---
+TRAIN_DIRS = ["Pot1.0Train", "Pot1.2Train"]
+TEST_DIRS = ["Pot1.0Test", "Pot1.2Test"]
 
-test_directories = [
-  "Pot1.0Test",
-  "Pot1.2Test",
-]
+def load_cached_datasets(cache_dir):
+    """
+    Attempts to load pre-processed .pt dataset shards from a directory.
+    
+    Args:
+        cache_dir (str): Directory searching for 'train.pt', 'test.pt', or shards.
+        
+    Returns:
+        tuple: (train_dataset, test_dataset, num_classes) or (None, None, None)
+    """
+    train_path = os.path.join(cache_dir, "train.pt")
+    test_path = os.path.join(cache_dir, "test.pt")
+    map_path = os.path.join(cache_dir, "class_map.pt")
+    
+    def check_exists(path):
+        if os.path.exists(path): return True
+        # Check for sharded files (e.g. train_shard0.pt)
+        base = path.replace('.pt', '')
+        shards = glob.glob(f"{base}_shard*.pt")
+        return len(shards) > 0
+    
+    if check_exists(train_path) and check_exists(test_path) and os.path.exists(map_path):
+        print(f"Found cached datasets in {cache_dir}")
+        train_ds = CachedDataset(train_path)
+        test_ds = CachedDataset(test_path)
+        tag_map = torch.load(map_path)
+        return train_ds, test_ds, len(tag_map)
+    else:
+        return None, None, None
 
 def load_datasets(base_dir):
     """
-    Loads training and testing datasets from specific subdirectories.
+    Loads raw .pot datasets from specific CASIA subdirectories.
+    Used as a fallback if cached .pt files are not found.
+    
+    Args:
+        base_dir (str): Root directory containing 'Pot1.0Train', etc.
+        
+    Returns:
+        tuple: (train_dataset, test_dataset)
     """
     train_datasets = []
     test_datasets = []
     
-    # Load Training Data
     print("Loading Training Data...")
-    for d in train_directories:
+    for d in TRAIN_DIRS:
         path = os.path.join(base_dir, d)
         if os.path.exists(path):
             print(f"  Loading from {path}...")
-            # Note: transform is applied on output.
-            ds = CASIADataset(path, transform=preprocess_stroke)
-            train_datasets.append(ds)
+            train_datasets.append(CASIADataset(path, transform=preprocess_stroke))
         else:
             print(f"  Warning: Directory {path} not found.")
 
-    # Load Testing Data
     print("Loading Testing Data...")
-    for d in test_directories:
+    for d in TEST_DIRS:
         path = os.path.join(base_dir, d)
         if os.path.exists(path):
             print(f"  Loading from {path}...")
-            ds = CASIADataset(path, transform=preprocess_stroke)
-            test_datasets.append(ds)
+            test_datasets.append(CASIADataset(path, transform=preprocess_stroke))
         else:
             print(f"  Warning: Directory {path} not found.")
             
     if not train_datasets and not test_datasets:
         return None, None
         
-    full_train_dataset = ConcatDataset(train_datasets) if train_datasets else None
-    full_test_dataset = ConcatDataset(test_datasets) if test_datasets else None
+    full_train = ConcatDataset(train_datasets) if train_datasets else None
+    full_test = ConcatDataset(test_datasets) if test_datasets else None
     
-    return full_train_dataset, full_test_dataset
+    return full_train, full_test
 
 def train(args):
-    # Hyperparameters
-    BATCH_SIZE = 16
+    """
+    Main training loop.
+    """
+    BATCH_SIZE = args.batch_size
     LR = 0.001
     EPOCHS = args.epochs
     
+    # 1. Device Setup
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f"Using device: {device}")
+    
+    # 2. Data Loading
     train_dataset = None
     test_dataset = None
+    NUM_CLASSES = 0
     
     if args.data_dir and os.path.exists(args.data_dir):
-        # Check if we should use the structured loading
-        # If the subdirectories exist in args.data_dir, use specific loading
-        # Otherwise, fall back to loading the entire folder as one dataset
+        # A. Try Loading Cache
+        processed_dir = os.path.join(args.data_dir, 'processed')
+        if os.path.exists(processed_dir):
+             train_dataset, test_dataset, NUM_CLASSES = load_cached_datasets(processed_dir)
         
-        # Check if any expected subdirs exist
-        has_subdirs = any(os.path.exists(os.path.join(args.data_dir, d)) for d in train_directories + test_directories)
-        
-        if has_subdirs:
-            print(f"Detected structured CASIA dataset in {args.data_dir}")
-            train_dataset, test_dataset = load_datasets(args.data_dir)
+        if not train_dataset:
+             train_dataset, test_dataset, NUM_CLASSES = load_cached_datasets(args.data_dir)
+
+        if train_dataset:
+             print(f"Using cached data. Num Classes: {NUM_CLASSES}")
         else:
-            print(f"Loading generic dataset from {args.data_dir}")
-            train_dataset = CASIADataset(args.data_dir, transform=preprocess_stroke)
+             # B. Fallback to Raw Loading
+             has_subdirs = any(os.path.exists(os.path.join(args.data_dir, d)) for d in TRAIN_DIRS + TEST_DIRS)
+             
+             if has_subdirs:
+                 print(f"Detected structured CASIA dataset in {args.data_dir}")
+                 train_dataset, test_dataset = load_datasets(args.data_dir)
+             else:
+                 print(f"Loading generic dataset from {args.data_dir}")
+                 train_dataset = CASIADataset(args.data_dir, transform=preprocess_stroke)
     
+    # 3. Handle Missing/Dummy Data
     if not train_dataset:
         print("No valid training data found. Using Dummy Dataset.")
         train_dataset = DummyDataset()
         NUM_CLASSES = 10
     else:
-        # Determine num classes. 
-        # Since we might have multiple datasets, we need a consistent mapping.
-        # Currently, each CASIADataset creates its own mapping based on the files it sees.
-        # This IS A PROBLEM if we use ConcatDataset. 
-        # Different datasets might map the same tag to different indices if the set of tags differs!
-        # Ideally, we should scan all files first to build a global tag map.
-        # OR: CASIADataset needs to accept a predefined tag map.
-        pass 
-        
-    # FIX: Ensure consistent class mapping across datasets
-    # Create a global tag map from all datasets (train + test)
-    all_datasets = []
-    if isinstance(train_dataset, ConcatDataset):
-        all_datasets.extend(train_dataset.datasets)
-    elif train_dataset:
-         all_datasets.append(train_dataset)
-         
-    if isinstance(test_dataset, ConcatDataset):
-        all_datasets.extend(test_dataset.datasets)
-    elif test_dataset:
-        all_datasets.append(test_dataset)
-        
-    if all_datasets and not isinstance(all_datasets[0], DummyDataset):
-        # Collect all unique tags
-        all_tags = set()
-        for ds in all_datasets:
-            # Assuming ds has .samples with 'tag_code'
-             for s in ds.samples:
-                 all_tags.add(s['tag_code'])
-        
-        sorted_tags = sorted(list(all_tags))
-        tag_to_idx = {tag: i for i, tag in enumerate(sorted_tags)}
-        NUM_CLASSES = len(sorted_tags)
-        print(f"Global Class Map: {NUM_CLASSES} classes found.")
-        
-        # Update all datasets to use this map
-        for ds in all_datasets:
-            ds.tag_to_idx = tag_to_idx
-    elif isinstance(train_dataset, DummyDataset):
-        NUM_CLASSES = 10
+        if not NUM_CLASSES: 
+             NUM_CLASSES = 10
+             
+    # 4. Global Class Mapping (for Raw Datasets)
+    if not NUM_CLASSES and train_dataset and not isinstance(train_dataset, DummyDataset):
+        all_datasets = []
+        if isinstance(train_dataset, ConcatDataset):
+            all_datasets.extend(train_dataset.datasets)
+        elif train_dataset:
+             all_datasets.append(train_dataset)
+        if isinstance(test_dataset, ConcatDataset):
+            all_datasets.extend(test_dataset.datasets)
+        elif test_dataset:
+            all_datasets.append(test_dataset)
+            
+        if all_datasets:
+            all_tags = set()
+            for ds in all_datasets:
+                if hasattr(ds, 'samples'):
+                     for s in ds.samples:
+                         all_tags.add(s['tag_code'])
+            
+            if all_tags:
+                sorted_tags = sorted(list(all_tags))
+                tag_to_idx = {tag: i for i, tag in enumerate(sorted_tags)}
+                NUM_CLASSES = len(sorted_tags)
+                print(f"Global Class Map: {NUM_CLASSES} classes found.")
+                for ds in all_datasets:
+                    if hasattr(ds, 'tag_to_idx'):
+                        ds.tag_to_idx = tag_to_idx
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False) if test_dataset else None
+    # 5. DataLoaders
+    # Pin memory helps data transfer, but can be tricky on MPS in older versions.
+    use_pin_memory = (device.type != 'mps')
+    num_workers = min(4, os.cpu_count() or 1)
     
-    # Model
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=num_workers, 
+        pin_memory=use_pin_memory
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False, 
+        num_workers=num_workers, 
+        pin_memory=use_pin_memory
+    ) if test_dataset else None
+    
+    # 6. Model & Optimization
     model = HandwritingModel(num_classes=NUM_CLASSES)
-    
-    # Loss
     criterion = CombinedLoss()
-    
-    # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=LR)
     
+    model.to(device)
     model.train()
     
+    # AMP Scaler
+    use_amp = (device.type == 'cuda')
+    scaler = GradScaler(enabled=use_amp)
+
+    # Scheduler: Reduce LR on plateau
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    
+    # Save initialization for Lottery Ticket Rewinding
+    if not args.resume: # Only save init if starting fresh
+        torch.save(model.state_dict(), "models/init_model.pth")
+        print("Saved 'models/init_model.pth' for Lottery Ticket rewinding.")
+    
+    best_acc = 0.0
+    
+    
+    if args.resume:
+        resume_path = args.resume if isinstance(args.resume, str) else "models/best_model.pth"
+        if os.path.exists(resume_path):
+             print(f"Resuming training from {resume_path}...")
+             state_dict = torch.load(resume_path, map_location=device)
+             
+             # Pruning Detection: Apply identity masks if loading a sparse model
+             for key in state_dict.keys():
+                 if 'weight_mask' in key:
+                     layer_name = key.replace('.weight_mask', '')
+                     module = model
+                     for part in layer_name.split('.'):
+                         module = getattr(module, part)
+                    
+                     import torch.nn.utils.prune as prune
+                     prune.identity(module, 'weight')
+                     print(f"  [Resume] Applied pruning structure to {layer_name}")
+
+             model.load_state_dict(state_dict)
+        else:
+             print(f"Warning: Resume file {resume_path} not found. Starting from scratch.")
+             
+    # 8. Canonical Embeddings (Stage 2 Support)
+    # Check for Canonical Embeddings
+    canonical_emb_path = "models/canonical_embeddings.pt"
+    canonical_emb = None
+    if os.path.exists(canonical_emb_path):
+        print(f"Found {canonical_emb_path}. Using Canonical Embeddings for Structural Loss.")
+        canonical_emb = torch.load(canonical_emb_path, map_location=device)
+        if canonical_emb.shape[0] != NUM_CLASSES:
+             print(f"Warning: Canvas mismatch ({canonical_emb.shape[0]} vs {NUM_CLASSES}). Fallback to random.")
+             canonical_emb = None
+    else:
+        print("Note: 'models/canonical_embeddings.pt' not found. Using random noise for Structural Loss (Stage 1).")
+        
+    history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
+    
+    # 9. Training Loop
     print("Starting training...")
     for epoch in range(EPOCHS):
         total_loss = 0
-        for batch_idx, (features, labels) in enumerate(train_loader):
-            # Features: (B, L, 7)
-            # Labels: (B,)
-            
-            char_logits, struct_pred = model(features)
-            
-            # Dummy struct target for now
-            struct_target = torch.randn_like(struct_pred) 
-            
-            loss, loss_dict = criterion(char_logits, labels, struct_pred, struct_target)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+        
+        for batch_idx, (features, labels) in enumerate(pbar):
+            features = features.to(device)
+            labels = labels.to(device)
             
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            
+            # AMP / Standard Context
+            if device.type == 'cuda':
+                 ctx = autocast('cuda', enabled=True)
+            else:
+                 ctx = torch.autocast(device_type=device.type, enabled=False) if hasattr(torch, 'autocast') else torch.no_grad()
+
+            if use_amp:
+                with autocast('cuda'):
+                    char_logits, struct_pred = model(features)
+                    
+                    if canonical_emb is not None:
+                        struct_target = canonical_emb[labels]
+                    else:
+                        struct_target = torch.randn_like(struct_pred) 
+                        
+                    loss, loss_dict = criterion(char_logits, labels, struct_pred, struct_target)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                char_logits, struct_pred = model(features)
+                
+                if canonical_emb is not None:
+                     struct_target = canonical_emb[labels]
+                else:
+                     struct_target = torch.randn_like(struct_pred)
+                     
+                loss, loss_dict = criterion(char_logits, labels, struct_pred, struct_target)
+                loss.backward()
+                optimizer.step()
             
             total_loss += loss.item()
-            
-            if batch_idx % 50 == 0:
-                print(f"Epoch {epoch+1}/{EPOCHS} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f}")
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
                 
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1} finished. Train Loss: {avg_loss:.4f}")
+        history['train_loss'].append(avg_loss)
         
-        # Evaluation
+        # 10. Evaluation
         if test_loader:
             model.eval()
             test_loss = 0
@@ -177,10 +325,16 @@ def train(args):
             total = 0
             with torch.no_grad():
                 for features, labels in test_loader:
+                    features = features.to(device)
+                    labels = labels.to(device)
+                    
                     char_logits, struct_pred = model(features)
-                    # For eval, just check CE loss and accuracy
-                    # We need to construct struct_target to compute full loss, or just skip it
-                    struct_target = torch.randn_like(struct_pred) 
+                    
+                    if canonical_emb is not None:
+                         struct_target = canonical_emb[labels]
+                    else:
+                         struct_target = torch.randn_like(struct_pred) 
+                         
                     loss, _ = criterion(char_logits, labels, struct_pred, struct_target)
                     test_loss += loss.item()
                     
@@ -188,10 +342,57 @@ def train(args):
                     total += labels.size(0)
                     correct += (predicted == labels).sum().item()
             
-            print(f"Epoch {epoch+1} Test Loss: {test_loss/len(test_loader):.4f} | Acc: {100 * correct / total:.2f}%")
+            avg_test_loss = test_loss/len(test_loader)
+            current_acc = 100 * correct / total
+            print(f"Epoch {epoch+1} Test Loss: {avg_test_loss:.4f} | Acc: {current_acc:.2f}%")
+            
+            scheduler.step(avg_test_loss)
+            history['val_loss'].append(avg_test_loss)
+            history['val_acc'].append(current_acc)
+            
+            if current_acc > best_acc:
+                best_acc = current_acc
+            if current_acc > best_acc:
+                best_acc = current_acc
+                torch.save(model.state_dict(), "models/best_model.pth")
+                print(f"  [+] Saved new best model with accuracy: {current_acc:.2f}%")
+                
             model.train()
+    
+    torch.save(model.state_dict(), "models/final_model.pth")
+    print("Training finished. Saved 'models/final_model.pth'.")
+    
+    # 11. Plotting
+    try:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(10, 5))
+        
+        plt.subplot(1, 2, 1)
+        plt.plot(history['train_loss'], label='Train Loss')
+        if history['val_loss']:
+            plt.plot(history['val_loss'], label='Val Loss')
+        plt.title('Loss History')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        if history['val_acc']:
+            plt.subplot(1, 2, 2)
+            plt.plot(history['val_acc'], label='Val Accuracy')
+            plt.title('Validation Accuracy')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy (%)')
+            plt.legend()
+            
+        plt.savefig('training_history.png')
+        print("Saved training history plot to 'training_history.png'")
+    except ImportError:
+        print("matplotlib not found, skipping plotting.")
 
 class DummyDataset(Dataset):
+    """
+    Placeholder dataset for testing without real data.
+    """
     def __init__(self, num_samples=100, num_classes=10):
         self.num_samples = num_samples
         self.num_classes = num_classes
@@ -206,12 +407,11 @@ class DummyDataset(Dataset):
         return torch.tensor(features, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    # Updated default to relative 'data/casia' to match user usage pattern slightly better 
-    # if they run from project root and have data/casia structure.
-    # But user said "locate these datasets in the /data folder" and structure is data/casia/Pot...
-    parser.add_argument('--data_dir', type=str, default='data/casia', help='Path to directory containing .pot files or structured subdirs')
-    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs')
+    parser = argparse.ArgumentParser(description="Train Handwriting Similarity Model")
+    parser.add_argument('--data_dir', type=str, default='data/casia', help='Path to dataset directory')
+    parser.add_argument('--epochs', type=int, default=15, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
+    parser.add_argument('--resume', nargs='?', const='models/best_model.pth', help='Resume from checkpoint')
     args = parser.parse_args()
     
     train(args)

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Handwriting Similarity Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f5f5f7;
+            color: #1d1d1f;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 {
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            background: white;
+            padding: 30px;
+            border-radius: 18px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+        }
+        .canvas-area {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        canvas {
+            border: 2px solid #e5e5ea;
+            border-radius: 12px;
+            cursor: crosshair;
+            background: #fff;
+            touch-action: none;
+        }
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        button.primary {
+            background: #007aff;
+            color: white;
+        }
+        button.secondary {
+            background: #e5e5ea;
+            color: #1d1d1f;
+        }
+        button:hover {
+            opacity: 0.9;
+            transform: scale(1.02);
+        }
+        .results-area {
+            width: 300px;
+            border-left: 1px solid #e5e5ea;
+            padding-left: 20px;
+        }
+        .result-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #f5f5f7;
+        }
+        .char {
+            font-size: 32px;
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+        .score {
+            font-size: 12px;
+            color: #86868b;
+        }
+        .metrics {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #86868b;
+        }
+    </style>
+</head>
+<body>
+    <h1>Handwriting Similarity Engine</h1>
+    
+    <div class="container">
+        <div class="canvas-area">
+            <canvas id="canvas" width="400" height="400"></canvas>
+            <div class="controls">
+                <button class="secondary" onclick="clearCanvas()">Clear</button>
+                <button class="primary" onclick="submitStroke()">Recognize</button>
+            </div>
+            <div id="status" style="margin-top: 10px; height: 20px; font-size: 14px; color: #007aff;"></div>
+        </div>
+        
+        <div class="results-area">
+            <h3>Top Matches</h3>
+            <div id="results">
+                <div style="color: #86868b; padding: 10px;">Draw a character to start...</div>
+            </div>
+            
+            <div class="metrics" id="metrics"></div>
+        </div>
+    </div>
+
+    <!-- Load the Preprocessing Logic -->
+    <script src="/static/preprocess.js"></script>
+    
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusEl = document.getElementById('status');
+        
+        // High DPI
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = 400 * dpr;
+        canvas.height = 400 * dpr;
+        canvas.style.width = "400px";
+        canvas.style.height = "400px";
+        ctx.scale(dpr, dpr);
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'black';
+
+        let isDrawing = false;
+        let points = []; 
+
+        // Input Handling
+        function getPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {
+                x: clientX - rect.left,
+                y: clientY - rect.top
+            };
+        }
+
+        function start(e) {
+            e.preventDefault();
+            isDrawing = true;
+            const p = getPos(e);
+            points.push(p);
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+        }
+
+        function move(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            const p = getPos(e);
+            points.push(p);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+        }
+
+        function end(e) {
+            isDrawing = false;
+        }
+
+        canvas.addEventListener('mousedown', start);
+        canvas.addEventListener('touchstart', start, {passive: false});
+        canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('touchmove', move, {passive: false});
+        canvas.addEventListener('mouseup', end);
+        canvas.addEventListener('touchend', end);
+        canvas.addEventListener('mouseleave', end);
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, 400, 400);
+            points = [];
+            document.getElementById('results').innerHTML = '<div style="color: #86868b; padding: 10px;">Draw a character to start...</div>';
+            statusEl.innerText = "";
+        }
+
+        async function submitStroke() {
+            if (points.length < 5) return;
+            
+            statusEl.innerText = "Processing...";
+            const t0 = performance.now();
+            
+            // 1. Client-Side Preprocessing (The Game Engine Logic)
+            try {
+                const features = processUserStroke(points); // From preprocess.js
+                const tPre = performance.now();
+                
+                // 2. Send to Server
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ features: features })
+                });
+                
+                const data = await response.json();
+                const tEnd = performance.now();
+                
+                if (data.status === 'success') {
+                    displayResults(data.matches);
+                    statusEl.innerText = `Done in ${Math.round(tEnd - t0)}ms`;
+                } else {
+                    statusEl.innerText = "Error: " + data.message;
+                }
+                
+            } catch (err) {
+                console.error(err);
+                statusEl.innerText = "Preprocessing Error";
+            }
+        }
+
+        function displayResults(matches) {
+            const container = document.getElementById('results');
+            container.innerHTML = "";
+            
+            matches.forEach(m => {
+                const el = document.createElement('div');
+                el.className = 'result-item';
+                el.innerHTML = `
+                    <span class="char">${m.char}</span>
+                    <span class="score">Dist: ${m.dist}</span>
+                `;
+                container.appendChild(el);
+            });
+        }
+    </script>
+</body>
+</html>

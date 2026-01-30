@@ -6,6 +6,59 @@ import os
 import glob
 from .preprocess import preprocess_stroke
 
+class CachedDataset(Dataset):
+    def __init__(self, pt_file_path):
+        """
+        Loads pre-processed tensors from a .pt file or multiple sharded files.
+        Expects dict with 'features' and 'labels'.
+        If pt_file_path is a directory or base prefix, we look for shards.
+        """
+        self.features = []
+        self.labels = []
+        
+        # Check if direct file or shard pattern
+        if os.path.exists(pt_file_path) and os.path.isfile(pt_file_path):
+            # Single file case
+            print(f"Loading cached dataset from {pt_file_path}...")
+            data = torch.load(pt_file_path)
+            self.features = data['features']
+            self.labels = data['labels']
+        else:
+            # Check for shards: prefix_shard0.pt, prefix_shard1.pt...
+            # The 'pt_file_path' coming in might be "data/processed/train.pt"
+            # But actual files might be "data/processed/train_shard0.pt"
+            
+            # Assuming pt_file_path is like ".../train" or ".../train.pt"
+            base_path = pt_file_path.replace('.pt', '')
+            
+            # Find all matching shards
+            shard_files = sorted(glob.glob(f"{base_path}_shard*.pt"))
+            
+            if not shard_files:
+                raise FileNotFoundError(f"No files found for {pt_file_path} or shards {base_path}_shard*.pt")
+            
+            print(f"Loading {len(shard_files)} shards from {base_path}...")
+            
+            all_features = []
+            all_labels = []
+            
+            for sh in shard_files:
+                print(f"  Loading {sh}...")
+                data = torch.load(sh)
+                all_features.append(data['features'])
+                all_labels.append(data['labels'])
+                
+            self.features = torch.cat(all_features)
+            self.labels = torch.cat(all_labels)
+            
+        print(f"Loaded {len(self.labels)} samples.")
+        
+    def __len__(self):
+        return len(self.labels)
+        
+    def __getitem__(self, idx):
+        return self.features[idx], self.labels[idx]
+
 def parse_pot_file(filepath):
     """
     Parses a CASIA .pot file.

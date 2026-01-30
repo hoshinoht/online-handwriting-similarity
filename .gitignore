@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project Specific
+data/
+models/
+training_history.png
+.DS_Store
+*.swp
+input/
+demo/static/preprocess.js.map
+
