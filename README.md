@@ -13,6 +13,7 @@ The system outputs both a character prediction and a similarity-based accuracy s
 
 ### Raw Input
 Each handwritten character is captured as a sequence of pen points:
+
 $$P = \{(x_i, y_i, t_i, p_i)\}, \quad i = 1 \dots N$$
 
 ### Normalization
@@ -22,9 +23,11 @@ $$P = \{(x_i, y_i, t_i, p_i)\}, \quad i = 1 \dots N$$
 
 ### Per-Point Feature Vector
 Each point is encoded as:
+
 $$f_i = [x_i, y_i, \Delta x_i, \Delta y_i, \sin\theta_i, \cos\theta_i, \kappa_i]$$
 
 Final input tensor:
+
 $$X \in \mathbb{R}^{L \times D}$$
 
 ## Model Architecture
@@ -35,32 +38,40 @@ $$X \in \mathbb{R}^{L \times D}$$
 - Global average pooling
 
 Output embedding:
+
 $$E \in \mathbb{R}^{d}, \quad d \approx 128$$
 
 ## Dual-Head Output
 
 ### Character Classification
 Softmax over $C$ characters:
+
 $$\hat{y}_{char} \in \mathbb{R}^{C}$$
 
 Loss:
+
 $$\mathcal{L}_{char} = \text{CrossEntropy}(\hat{y}_{char}, y_{char})$$
 
 ### Structural Similarity Head
 Predicted structural embedding:
+
 $$\hat{y}_{struct} \in [0,1]^R$$
 
 Cosine similarity:
+
 $$S_{struct} = \frac{\hat{y}_{struct} \cdot y_{struct}}{\|\hat{y}_{struct}\|\|y_{struct}\|}$$
 
 Structural loss:
+
 $$\mathcal{L}_{struct} = 1 - S_{struct}$$
 
 ## Training Objective
+
 $$\mathcal{L}_{total} = \mathcal{L}_{char} + \lambda \mathcal{L}_{struct}, \quad \lambda \in [0.05,0.2]$$
 
 ## Scoring for Learning Games
 Final score:
+
 $$Score = w_1 S_{struct} + w_2 S_{geom} + w_3 S_{prop}$$
 
 | Score | Feedback |
