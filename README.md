@@ -115,3 +115,12 @@ Commercial use of the databases is subject to charge. For possible license of co
 Cheng-Lin Liu (liucl@nlpr.ia.ac.cn), Fei Yin (fyin@nlpr.ia.ac.cn)
 National Laboratory of Pattern Recognition (NLPR)
 Institute of Automation of Chinese Academy of Sciences
+
+### The Lottery Ticket Hypothesis
+
+Published as a conference paper at ICLR 2019
+
+**THE LOTTERY TICKET HYPOTHESIS: FINDING SPARSE, TRAINABLE NEURAL NETWORKS**
+
+Jonathan Frankle (MIT CSAIL) _jfrankle@csail.mit.edu_  
+Michael Carbin (MIT CSAIL) _mcarbin@csail.mit.edu_
