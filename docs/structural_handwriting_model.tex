@@ -1,0 +1,134 @@
+
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{Structural-Aware Handwriting Similarity Model}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Objective}
+Design a high-speed, geometry-first model for online Chinese handwriting recognition and scoring, optimized for:
+\begin{itemize}
+\item Structural similarity rather than exact matching
+\item Continuous accuracy percentages
+\item Educational and learning-game feedback
+\item Edge-device deployment
+\end{itemize}
+
+The system outputs both a character prediction and a similarity-based accuracy score reflecting how close a user’s drawing is to the canonical structure.
+
+\section{Input Representation}
+
+\subsection{Raw Input}
+Each handwritten character is captured as a sequence of pen points:
+\[
+P = \{(x_i, y_i, t_i, p_i)\}, \quad i = 1 \dots N
+\]
+
+\subsection{Normalization}
+\begin{enumerate}
+\item Douglas--Peucker stroke simplification
+\item Resampling to fixed length $L$ (e.g.\ $L=128$)
+\item Spatial normalization to $[0,1]^2$
+\end{enumerate}
+
+\subsection{Per-Point Feature Vector}
+Each point is encoded as:
+\[
+f_i = [x_i, y_i, \Delta x_i, \Delta y_i, \sin\theta_i, \cos\theta_i, \kappa_i]
+\]
+
+Final input tensor:
+\[
+X \in \mathbb{R}^{L \times D}
+\]
+
+\section{Model Architecture}
+
+\subsection{Backbone}
+\begin{itemize}
+\item 1D Convolutional layers for local stroke primitives
+\item Single-layer GRU for temporal modeling
+\item Global average pooling
+\end{itemize}
+
+Output embedding:
+\[
+E \in \mathbb{R}^{d}, \quad d \approx 128
+\]
+
+\section{Dual-Head Output}
+
+\subsection{Character Classification}
+Softmax over $C$ characters:
+\[
+\hat{y}_{char} \in \mathbb{R}^{C}
+\]
+
+Loss:
+\[
+\mathcal{L}_{char} = \text{CrossEntropy}(\hat{y}_{char}, y_{char})
+\]
+
+\subsection{Structural Similarity Head}
+Predicted structural embedding:
+\[
+\hat{y}_{struct} \in [0,1]^R
+\]
+
+Cosine similarity:
+\[
+S_{struct} = \frac{\hat{y}_{struct} \cdot y_{struct}}{\|\hat{y}_{struct}\|\|y_{struct}\|}
+\]
+
+Structural loss:
+\[
+\mathcal{L}_{struct} = 1 - S_{struct}
+\]
+
+\section{Training Objective}
+\[
+\mathcal{L}_{total} = \mathcal{L}_{char} + \lambda \mathcal{L}_{struct}, \quad \lambda \in [0.05,0.2]
+\]
+
+\section{Scoring for Learning Games}
+Final score:
+\[
+Score = w_1 S_{struct} + w_2 S_{geom} + w_3 S_{prop}
+\]
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Score & Feedback \\
+\midrule
+$\geq 90\%$ & Excellent \\
+$75$--$90\%$ & Good \\
+$60$--$75\%$ & Acceptable \\
+$<60\%$ & Needs practice \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Model Compression}
+Iterative Magnitude Pruning removes 90--95\% of weights, followed by weight rewinding and retraining, producing a sparse winning-ticket network suitable for edge deployment.
+
+\section{Deployment}
+\begin{itemize}
+\item Export to ONNX
+\item INT8 quantization
+\item Sub-millisecond inference on mobile CPUs
+\item Fully offline operation
+\end{itemize}
+
+\section{Summary}
+The proposed model treats handwriting as geometry rather than pixels, supports graded similarity scoring, enables radical-level feedback, and is efficient enough for real-time educational applications.
+
+\end{document}
