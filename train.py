@@ -109,7 +109,7 @@ def train(args):
     Main training loop.
     """
     BATCH_SIZE = args.batch_size
-    LR = 0.001
+    LR = args.lr
     EPOCHS = args.epochs
     
     # 1. Device Setup
@@ -120,6 +120,7 @@ def train(args):
     else:
         device = torch.device('cpu')
     print(f"Using device: {device}")
+    print(f"Learning Rate: {LR}")
     
     # 2. Data Loading
     train_dataset = None
@@ -411,6 +412,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_dir', type=str, default='data/casia', help='Path to dataset directory')
     parser.add_argument('--epochs', type=int, default=15, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning Rate')
     parser.add_argument('--resume', nargs='?', const='models/best_model.pth', help='Resume from checkpoint')
     args = parser.parse_args()
     
