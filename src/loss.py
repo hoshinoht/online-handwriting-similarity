@@ -10,7 +10,7 @@ class CombinedLoss(nn.Module):
         """
         super(CombinedLoss, self).__init__()
         self.lambda_struct = lambda_struct
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.ce_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
         
     def forward(self, char_logits, char_targets, struct_pred, struct_target):
         """
@@ -26,7 +26,7 @@ class CombinedLoss(nn.Module):
         # Structural Similarity Loss
         # Cosine Similarity: sum(a*b)/(|a|*|b|)
         # F.cosine_similarity returns similarity for each element in batch
-        sim_struct = F.cosine_similarity(struct_pred, struct_target, dim=1)
+        sim_struct = F.cosine_similarity(struct_pred, struct_target, dim=1, eps=1e-8)
         
         # Loss = 1 - Similarity (mean over batch)
         loss_struct = 1.0 - torch.mean(sim_struct)

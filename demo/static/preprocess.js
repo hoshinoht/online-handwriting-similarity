@@ -107,9 +107,11 @@ function normalize(points) {
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
 
+  // Flip Y-axis: Canvas Y increases downward, but training data Y increases upward
+  // This affects sin values (training has negative sin mean, canvas has positive)
   return points.map(p => ({
     x: (p.x - centerX) / scale + 0.5,
-    y: (p.y - centerY) / scale + 0.5
+    y: 0.5 - (p.y - centerY) / scale
   }));
 }
 
@@ -165,7 +167,10 @@ function processUserStroke(rawPoints) {
   // Convert to {x,y} if needed
   const points = rawPoints.map(p => ({ x: p.x, y: p.y }));
 
-  const simplified = douglasPeucker(points, 2.0);
+  // Douglas-Peucker epsilon: Training data uses epsilon=1.0 on ~10000 pixel canvas
+  // Demo canvas is 400 pixels, so scale epsilon proportionally: 1.0 * 400/10000 = 0.04
+  // Using slightly larger value to account for mouse jitter
+  const simplified = douglasPeucker(points, 0.1);
   const resampled = resample(simplified, 128);
   const normalized = normalize(resampled);
   const featureVector = extractFeatures(normalized);

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -14,23 +15,27 @@
             align-items: center;
             padding: 20px;
         }
+
         h1 {
             margin-bottom: 20px;
             font-weight: 500;
         }
+
         .container {
             display: flex;
             gap: 20px;
             background: white;
             padding: 30px;
             border-radius: 18px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
         }
+
         .canvas-area {
             display: flex;
             flex-direction: column;
             align-items: center;
         }
+
         canvas {
             border: 2px solid #e5e5ea;
             border-radius: 12px;
@@ -38,11 +43,13 @@
             background: #fff;
             touch-action: none;
         }
+
         .controls {
             margin-top: 15px;
             display: flex;
             gap: 10px;
         }
+
         button {
             padding: 10px 20px;
             border: none;
@@ -52,23 +59,28 @@
             cursor: pointer;
             transition: all 0.2s ease;
         }
+
         button.primary {
             background: #007aff;
             color: white;
         }
+
         button.secondary {
             background: #e5e5ea;
             color: #1d1d1f;
         }
+
         button:hover {
             opacity: 0.9;
             transform: scale(1.02);
         }
+
         .results-area {
             width: 300px;
             border-left: 1px solid #e5e5ea;
             padding-left: 20px;
         }
+
         .result-item {
             display: flex;
             justify-content: space-between;
@@ -76,14 +88,17 @@
             padding: 10px;
             border-bottom: 1px solid #f5f5f7;
         }
+
         .char {
             font-size: 32px;
             font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
         }
+
         .score {
             font-size: 12px;
             color: #86868b;
         }
+
         .metrics {
             margin-top: 20px;
             font-size: 12px;
@@ -91,9 +106,10 @@
         }
     </style>
 </head>
+
 <body>
     <h1>Handwriting Similarity Engine</h1>
-    
+
     <div class="container">
         <div class="canvas-area">
             <canvas id="canvas" width="400" height="400"></canvas>
@@ -103,25 +119,25 @@
             </div>
             <div id="status" style="margin-top: 10px; height: 20px; font-size: 14px; color: #007aff;"></div>
         </div>
-        
+
         <div class="results-area">
             <h3>Top Matches</h3>
             <div id="results">
                 <div style="color: #86868b; padding: 10px;">Draw a character to start...</div>
             </div>
-            
+
             <div class="metrics" id="metrics"></div>
         </div>
     </div>
 
     <!-- Load the Preprocessing Logic -->
     <script src="/static/preprocess.js"></script>
-    
+
     <script>
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const statusEl = document.getElementById('status');
-        
+
         // High DPI
         const dpr = window.devicePixelRatio || 1;
         canvas.width = 400 * dpr;
@@ -135,7 +151,8 @@
         ctx.strokeStyle = 'black';
 
         let isDrawing = false;
-        let points = []; 
+        let strokes = [];      // Array of strokes, each stroke is an array of points
+        let currentStroke = []; // Current stroke being drawn
 
         // Input Handling
         function getPos(e) {
@@ -151,8 +168,9 @@
         function start(e) {
             e.preventDefault();
             isDrawing = true;
+            currentStroke = []; // Start a new stroke
             const p = getPos(e);
-            points.push(p);
+            currentStroke.push(p);
             ctx.beginPath();
             ctx.moveTo(p.x, p.y);
         }
@@ -161,58 +179,66 @@
             if (!isDrawing) return;
             e.preventDefault();
             const p = getPos(e);
-            points.push(p);
+            currentStroke.push(p);
             ctx.lineTo(p.x, p.y);
             ctx.stroke();
         }
 
         function end(e) {
+            if (isDrawing && currentStroke.length > 0) {
+                strokes.push(currentStroke); // Save the completed stroke
+            }
             isDrawing = false;
+            currentStroke = [];
         }
 
         canvas.addEventListener('mousedown', start);
-        canvas.addEventListener('touchstart', start, {passive: false});
+        canvas.addEventListener('touchstart', start, { passive: false });
         canvas.addEventListener('mousemove', move);
-        canvas.addEventListener('touchmove', move, {passive: false});
+        canvas.addEventListener('touchmove', move, { passive: false });
         canvas.addEventListener('mouseup', end);
         canvas.addEventListener('touchend', end);
         canvas.addEventListener('mouseleave', end);
 
         function clearCanvas() {
             ctx.clearRect(0, 0, 400, 400);
-            points = [];
+            strokes = [];
+            currentStroke = [];
             document.getElementById('results').innerHTML = '<div style="color: #86868b; padding: 10px;">Draw a character to start...</div>';
             statusEl.innerText = "";
         }
 
         async function submitStroke() {
+            // Flatten all strokes into a single points array (matching training data format)
+            const points = strokes.flat();
+            console.log(`Submitting ${strokes.length} strokes, ${points.length} total points`);
+            console.log('Stroke lengths:', strokes.map(s => s.length));
             if (points.length < 5) return;
-            
+
             statusEl.innerText = "Processing...";
             const t0 = performance.now();
-            
-            // 1. Client-Side Preprocessing (The Game Engine Logic)
+
             try {
-                const features = processUserStroke(points); // From preprocess.js
-                const tPre = performance.now();
-                
-                // 2. Send to Server
-                const response = await fetch('/predict', {
+                // Send raw points to server for Python-based preprocessing
+                // This ensures preprocessing matches exactly what was used during training
+                const pointsArray = points.map(p => [p.x, p.y]);
+
+                const response = await fetch('/predict_raw', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ features: features })
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ points: pointsArray })
                 });
-                
+
                 const data = await response.json();
                 const tEnd = performance.now();
-                
+
                 if (data.status === 'success') {
                     displayResults(data.matches);
                     statusEl.innerText = `Done in ${Math.round(tEnd - t0)}ms`;
                 } else {
                     statusEl.innerText = "Error: " + data.message;
                 }
-                
+
             } catch (err) {
                 console.error(err);
                 statusEl.innerText = "Preprocessing Error";
@@ -222,17 +248,18 @@
         function displayResults(matches) {
             const container = document.getElementById('results');
             container.innerHTML = "";
-            
+
             matches.forEach(m => {
                 const el = document.createElement('div');
                 el.className = 'result-item';
                 el.innerHTML = `
                     <span class="char">${m.char}</span>
-                    <span class="score">Dist: ${m.dist}</span>
+                    <span class="score">Conf: ${m.dist}</span>
                 `;
                 container.appendChild(el);
             });
         }
     </script>
 </body>
+
 </html>

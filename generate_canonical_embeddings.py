@@ -69,7 +69,19 @@ def generate_canonical(args):
     processed_dir = os.path.join(args.data_dir, 'processed')
     if os.path.exists(processed_dir):
         dataset = load_cached_datasets(processed_dir)
-    elif os.path.exists(args.data_dir):
+        
+    # Fallback: Check for data/processed (sibling to casia)
+    if not dataset:
+         sibling_processed = os.path.join(os.path.dirname(args.data_dir.rstrip('/\\')), 'processed')
+         if os.path.exists(sibling_processed):
+             print(f"Checking detected sibling cache: {sibling_processed}")
+             dataset = load_cached_datasets(sibling_processed)
+         
+         # Hardcoded common fallback
+         if not dataset and os.path.exists('data/processed'):
+              dataset = load_cached_datasets('data/processed')
+
+    if not dataset and os.path.exists(args.data_dir):
         dataset = load_cached_datasets(args.data_dir)
          
     if not dataset:
@@ -80,6 +92,10 @@ def generate_canonical(args):
     map_path = os.path.join(args.data_dir, 'processed', 'class_map.pt')
     if not os.path.exists(map_path):
          map_path = os.path.join(args.data_dir, 'class_map.pt')
+         
+    # Fallback search matching dataset logic
+    if not os.path.exists(map_path):
+          map_path = "data/processed/class_map.pt"
     
     if os.path.exists(map_path):
         tag_map = torch.load(map_path)
@@ -91,6 +107,12 @@ def generate_canonical(args):
 
     # 4. Model Loading
     model = HandwritingModel(num_classes=num_classes)
+    if not os.path.exists(args.model_path) and args.model_path == 'models/best_model.pth':
+        # Fallback to final_model.pth
+        if os.path.exists('models/final_model.pth'):
+             print("Warning: 'models/best_model.pth' not found. Using 'models/final_model.pth' instead.")
+             args.model_path = 'models/final_model.pth'
+
     if os.path.exists(args.model_path):
         print(f"Loading model weights from {args.model_path}...")
         state_dict = torch.load(args.model_path, map_location=device)
