@@ -130,9 +130,6 @@
         </div>
     </div>
 
-    <!-- Load the Preprocessing Logic -->
-    <script src="/static/preprocess.js"></script>
-
     <script>
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -209,24 +206,22 @@
         }
 
         async function submitStroke() {
-            // Flatten all strokes into a single points array (matching training data format)
-            const points = strokes.flat();
-            console.log(`Submitting ${strokes.length} strokes, ${points.length} total points`);
+            console.log(`Submitting ${strokes.length} strokes`);
             console.log('Stroke lengths:', strokes.map(s => s.length));
-            if (points.length < 5) return;
+            const totalPoints = strokes.reduce((sum, s) => sum + s.length, 0);
+            if (totalPoints < 5) return;
 
             statusEl.innerText = "Processing...";
             const t0 = performance.now();
 
             try {
-                // Send raw points to server for Python-based preprocessing
-                // This ensures preprocessing matches exactly what was used during training
-                const pointsArray = points.map(p => [p.x, p.y]);
+                // Send strokes array preserving stroke boundaries for pen_state
+                const strokesArray = strokes.map(s => s.map(p => [p.x, p.y]));
 
                 const response = await fetch('/predict_raw', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ points: pointsArray })
+                    body: JSON.stringify({ strokes: strokesArray })
                 });
 
                 const data = await response.json();
@@ -252,10 +247,18 @@
             matches.forEach(m => {
                 const el = document.createElement('div');
                 el.className = 'result-item';
-                el.innerHTML = `
-                    <span class="char">${m.char}</span>
-                    <span class="score">Conf: ${m.dist}</span>
-                `;
+
+                const charSpan = document.createElement('span');
+                charSpan.className = 'char';
+                charSpan.textContent = m.char;
+
+                const scoreSpan = document.createElement('span');
+                scoreSpan.className = 'score';
+                const simText = m.similarity ? ` | Sim: ${m.similarity}` : '';
+                scoreSpan.textContent = `Conf: ${m.dist}${simText}`;
+
+                el.appendChild(charSpan);
+                el.appendChild(scoreSpan);
                 container.appendChild(el);
             });
         }

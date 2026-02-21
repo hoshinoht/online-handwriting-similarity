@@ -107,12 +107,14 @@ def normalize(points):
 
 def extract_features(points):
     """
-    Extracts features for each point: [x, y, dx, dy, sin, cos, curvature]
-    :param points: (L, 2) normalized points
-    :return: features (L, 7)
+    Extracts features for each point: [x, y, dx, dy, sin, cos, curvature, (pen_state)]
+    :param points: (L, 2) or (L, 3) normalized points — 3rd column is pen_state
+    :return: features (L, 7) or (L, 8) if pen_state present
     """
     L = len(points)
-    features = np.zeros((L, 7))
+    has_pen_state = points.shape[1] > 2
+    out_dim = 8 if has_pen_state else 7
+    features = np.zeros((L, out_dim))
     
     # 1. x, y
     features[:, 0:2] = points[:, :2]
@@ -171,15 +173,17 @@ def extract_features(points):
         kappa[1:] = d_theta
     
     features[:, 6] = kappa
-    
+
+    if has_pen_state:
+        features[:, 7] = points[:, 2]
+
     return features
 
 def preprocess_stroke(stroke, L=128, epsilon=1.0):
     """
-    Full pipeline
+    Full pipeline. Accepts (N, 2) or (N, 3) where 3rd column is pen_state.
     """
     # 1. Simplify
-    # stroke should be (N, 2)
     simplified = douglas_peucker(stroke, epsilon)
     
     # 2. Resample

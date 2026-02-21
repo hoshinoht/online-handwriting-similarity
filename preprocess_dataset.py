@@ -10,8 +10,8 @@ from src.dataset import CASIADataset
 from src.preprocess import preprocess_stroke
 
 # Define standard directories
-TRAIN_DIRS = ["Pot1.0Train", "Pot1.2Train"]
-TEST_DIRS = ["Pot1.0Test", "Pot1.2Test"]
+TRAIN_DIRS = ["Pot1.0Train", "Pot1.1Train"]
+TEST_DIRS = ["Pot1.0Test", "Pot1.1Test"]
 
 def process_chunk_wrapper(chunk_data):
     """

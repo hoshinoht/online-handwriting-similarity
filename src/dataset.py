@@ -204,9 +204,11 @@ def parse_pot_file(filepath):
                 i += 2
 
                 if x == -1 and y == 0:
-                    # End of stroke
+                    # End of stroke — mark last point with pen_state=1 (pen lift)
                     if current_stroke:
-                        all_points.extend(current_stroke)
+                        for j, pt in enumerate(current_stroke):
+                            pen_state = 1.0 if j == len(current_stroke) - 1 else 0.0
+                            all_points.append([pt[0], pt[1], pen_state])
                         current_stroke = []
                     continue
                 elif x == -1 and y == -1:
@@ -216,7 +218,9 @@ def parse_pot_file(filepath):
                     current_stroke.append([x, y])
 
             if current_stroke:
-                all_points.extend(current_stroke)
+                for j, pt in enumerate(current_stroke):
+                    pen_state = 1.0 if j == len(current_stroke) - 1 else 0.0
+                    all_points.append([pt[0], pt[1], pen_state])
 
             if len(all_points) > 0:
                 samples.append({

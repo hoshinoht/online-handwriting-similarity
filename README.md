@@ -32,30 +32,32 @@ $$X \in \mathbb{R}^{L \times D}$$
 
 ## Model Architecture
 
-### Backbone
-- 1D Convolutional layers for local stroke primitives
-- Single-layer GRU for temporal modeling
-- Global average pooling
+### Backbone: ResNet-1D + BiGRU + Attention
+- **ResNet-1D**: Three residual blocks (64→128→256→hidden_dim) for local stroke primitives
+- **Bidirectional GRU**: 2-layer BiGRU for temporal modeling in both directions
+- **Attention pooling**: Learned attention weights over the sequence, producing a fixed-size embedding
 
 Output embedding:
 
-$$E \in \mathbb{R}^{d}, \quad d \approx 128$$
+$$E \in \mathbb{R}^{d}, \quad d = \text{hidden\_dim} \times 2$$
 
 ## Dual-Head Output
 
-### Character Classification
-Softmax over $C$ characters:
+### Character Classification (ArcFace)
+Features are projected and L2-normalized, then classified via ArcFace angular margin:
 
-$$\hat{y}_{char} \in \mathbb{R}^{C}$$
+$$\text{logits}_i = s \cdot \cos(\theta_i + m \cdot \mathbb{1}[i = y])$$
+
+where $s=30$ (scale), $m=0.5$ (angular margin), and $\theta_i$ is the angle between the normalized feature and the $i$-th class weight. This forces tighter intra-class clustering — critical for thousands of visually similar Chinese characters.
 
 Loss:
 
-$$\mathcal{L}_{char} = \text{CrossEntropy}(\hat{y}_{char}, y_{char})$$
+$$\mathcal{L}_{char} = \text{CrossEntropy}(\text{logits}, y_{char}), \quad \text{label smoothing} = 0.05$$
 
 ### Structural Similarity Head
-Predicted structural embedding:
+Predicted structural embedding (L2-normalized to unit hypersphere):
 
-$$\hat{y}_{struct} \in [0,1]^R$$
+$$\hat{y}_{struct} = \frac{f(E)}{\|f(E)\|_2}$$
 
 Cosine similarity:
 
@@ -65,9 +67,14 @@ Structural loss:
 
 $$\mathcal{L}_{struct} = 1 - S_{struct}$$
 
-## Training Objective
+## Training
 
 $$\mathcal{L}_{total} = \mathcal{L}_{char} + \lambda \mathcal{L}_{struct}, \quad \lambda \in [0.05,0.2]$$
+
+- **Optimizer**: AdamW (weight decay 1e-4)
+- **LR schedule**: Linear warmup (3 epochs) → cosine annealing
+- **Gradient clipping**: max norm 5.0
+- **AMP**: Mixed precision on CUDA
 
 ## Scoring for Learning Games
 Final score:

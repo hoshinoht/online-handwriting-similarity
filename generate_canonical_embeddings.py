@@ -105,17 +105,18 @@ def generate_canonical(args):
         print("Error: class_map.pt not found.")
         return
 
-    # 4. Model Loading
-    model = HandwritingModel(num_classes=num_classes)
-    if not os.path.exists(args.model_path) and args.model_path == 'models/best_model.pth':
-        # Fallback to final_model.pth
+    # 4. Model Loading — infer input_dim from checkpoint for backward compat
+    model_path = args.model_path
+    if not os.path.exists(model_path) and model_path == 'models/best_model.pth':
         if os.path.exists('models/final_model.pth'):
              print("Warning: 'models/best_model.pth' not found. Using 'models/final_model.pth' instead.")
-             args.model_path = 'models/final_model.pth'
+             model_path = 'models/final_model.pth'
 
-    if os.path.exists(args.model_path):
-        print(f"Loading model weights from {args.model_path}...")
-        state_dict = torch.load(args.model_path, map_location=device)
+    if os.path.exists(model_path):
+        print(f"Loading model weights from {model_path}...")
+        state_dict = torch.load(model_path, map_location=device)
+        input_dim = state_dict['start_conv.weight'].shape[1] if 'start_conv.weight' in state_dict else 8
+        model = HandwritingModel(num_classes=num_classes, input_dim=input_dim)
         model.load_state_dict(state_dict)
     else:
         print(f"Error: Model {args.model_path} not found.")
@@ -130,7 +131,7 @@ def generate_canonical(args):
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
     # Determine embedding dimension from model architecture
-    emb_dim = model.fc_struct.out_features
+    emb_dim = model.fc_struct[-1].out_features
     
     # Tensors to accumulate sum and count for computing the mean
     class_sums = torch.zeros(num_classes, emb_dim, device=device)

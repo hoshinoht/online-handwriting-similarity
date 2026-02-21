@@ -77,7 +77,9 @@ def load_resources():
     inferred_num_classes = None
     if os.path.exists(MODEL_PATH):
         state = torch.load(MODEL_PATH, map_location=device)
-        if 'fc_char.3.weight' in state:
+        if 'arcface.weight' in state:
+            inferred_num_classes = state['arcface.weight'].shape[0]
+        elif 'fc_char.3.weight' in state:
             inferred_num_classes = state['fc_char.3.weight'].shape[0]
 
     # Load Map (prefer map that matches inferred num_classes)
@@ -109,8 +111,11 @@ def load_resources():
     else:
         print("Warning: Canonical Embeddings not found. Search will fail.")
 
-    # Load Model
-    model = HandwritingModel(num_classes=num_classes)
+    # Load Model — infer input_dim from checkpoint for backward compat
+    input_dim = 8  # default
+    if state is not None and 'start_conv.weight' in state:
+        input_dim = state['start_conv.weight'].shape[1]
+    model = HandwritingModel(num_classes=num_classes, input_dim=input_dim)
     if state is None and os.path.exists(MODEL_PATH):
         state = torch.load(MODEL_PATH, map_location=device)
 
@@ -143,102 +148,24 @@ def predict_raw():
     """Takes raw stroke points and does preprocessing server-side using Python code."""
     try:
         data = request.json
-        raw_points = np.array(data['points'], dtype=np.float32)  # (N, 2)
 
-        print(f"Received {len(raw_points)} raw points")
+        # Accept strokes array (preferred) or flat points (backward compat)
+        if 'strokes' in data:
+            strokes = data['strokes']
+            all_points = []
+            for stroke in strokes:
+                for j, pt in enumerate(stroke):
+                    pen_state = 1.0 if j == len(stroke) - 1 else 0.0
+                    all_points.append([pt[0], pt[1], pen_state])
+            raw_points = np.array(all_points, dtype=np.float32)  # (N, 3)
+        else:
+            raw_points = np.array(data['points'], dtype=np.float32)  # (N, 2)
 
-        # DEMO HACK: Detect simple shapes based on bounding box aspect ratio and stroke pattern
-        min_xy = raw_points.min(axis=0)
-        max_xy = raw_points.max(axis=0)
-        width = max_xy[0] - min_xy[0]
-        height = max_xy[1] - min_xy[1]
-        aspect = width / (height + 1e-8)
+        print(f"Received {len(raw_points)} raw points, dims={raw_points.shape[1]}")
 
-        # Detect 木 pattern: roughly square, has points in all quadrants
-        center = (min_xy + max_xy) / 2
-        rel_points = raw_points - center
-        q1 = np.sum((rel_points[:, 0] > 0) & (
-            rel_points[:, 1] < 0))  # top-right
-        q2 = np.sum((rel_points[:, 0] < 0) & (
-            rel_points[:, 1] < 0))  # top-left
-        q3 = np.sum((rel_points[:, 0] < 0) & (
-            rel_points[:, 1] > 0))  # bottom-left
-        q4 = np.sum((rel_points[:, 0] > 0) & (
-            rel_points[:, 1] > 0))  # bottom-right
-
-        demo_results = None
-
-        # Count stroke complexity by looking at direction changes
-        deltas = np.diff(raw_points, axis=0)
-        angles = np.arctan2(deltas[:, 1], deltas[:, 0])
-        angle_changes = np.abs(np.diff(angles))
-        angle_changes = np.where(
-            angle_changes > np.pi, 2*np.pi - angle_changes, angle_changes)
-        total_turning = np.sum(angle_changes)
-        num_direction_changes = np.sum(
-            angle_changes > 0.5)  # significant turns
-
-        # More complex characters have more turning/direction changes
-        is_complex = num_direction_changes > 20 or total_turning > 15
-        is_very_complex = num_direction_changes > 35 or total_turning > 25
-
-        if is_very_complex and 0.7 < aspect < 1.4:
-            # Very complex character - like 龍 (dragon)
-            demo_results = [
-                {"char": "龍", "dist": "0.7845"},
-                {"char": "龕", "dist": "0.1234"},
-                {"char": "鑫", "dist": "0.0534"},
-                {"char": "麗", "dist": "0.0245"},
-                {"char": "靈", "dist": "0.0142"},
-            ]
-        elif is_complex and 0.7 < aspect < 1.4:
-            # Complex character - like 繁 (complex/traditional)
-            demo_results = [
-                {"char": "繁", "dist": "0.7623"},
-                {"char": "藝", "dist": "0.1245"},
-                {"char": "機", "dist": "0.0678"},
-                {"char": "織", "dist": "0.0312"},
-                {"char": "體", "dist": "0.0142"},
-            ]
-        elif 0.6 < aspect < 1.6 and min(q1, q2, q3, q4) > 5:
-            # Looks like 木 or similar tree-like character
-            demo_results = [
-                {"char": "木", "dist": "0.8234"},
-                {"char": "本", "dist": "0.1523"},
-                {"char": "未", "dist": "0.0142"},
-                {"char": "末", "dist": "0.0067"},
-                {"char": "朱", "dist": "0.0034"},
-            ]
-        elif aspect > 2.0:
-            # Wide horizontal stroke - likely 一
-            demo_results = [
-                {"char": "一", "dist": "0.9123"},
-                {"char": "二", "dist": "0.0534"},
-                {"char": "三", "dist": "0.0213"},
-                {"char": "工", "dist": "0.0087"},
-                {"char": "土", "dist": "0.0043"},
-            ]
-        elif aspect < 0.5:
-            # Tall vertical stroke
-            demo_results = [
-                {"char": "丨", "dist": "0.8567"},
-                {"char": "十", "dist": "0.0823"},
-                {"char": "中", "dist": "0.0342"},
-                {"char": "丁", "dist": "0.0156"},
-                {"char": "下", "dist": "0.0112"},
-            ]
-
-        if demo_results:
-            return jsonify({"status": "success", "matches": demo_results})
-
-        # Fall back to actual model prediction
-        raw_points[:, 1] = -raw_points[:, 1]
         features = preprocess_stroke(raw_points)
 
         print(f"Preprocessed features shape: {features.shape}")
-        for i in range(7):
-            print(
-                f"  Feature {i}: min={features[:, i].min():.4f}, max={features[:, i].max():.4f}, mean={features[:, i].mean():.4f}")
 
         # Add batch dim
         tensor = torch.from_numpy(features.astype(
@@ -255,10 +182,16 @@ def predict_raw():
                 confidence = vals[0][i].item()
                 tag = idx_to_tag.get(idx, "?")
                 char = decode_tag(tag)
-                results.append({
+                result = {
                     "char": str(char),
                     "dist": f"{confidence:.4f}"
-                })
+                }
+                if canonical_embeddings is not None and idx < canonical_embeddings.shape[0]:
+                    sim = F.cosine_similarity(
+                        struct_emb, canonical_embeddings[idx].unsqueeze(0)
+                    ).item()
+                    result["similarity"] = f"{sim:.4f}"
+                results.append(result)
 
             return jsonify({"status": "success", "matches": results})
 
@@ -307,11 +240,16 @@ def predict():
                 tag = idx_to_tag.get(idx, "?")
                 char = decode_tag(tag)
 
-                results.append({
+                result = {
                     "char": str(char),
-                    # Now shows confidence instead of distance
                     "dist": f"{confidence:.4f}"
-                })
+                }
+                if canonical_embeddings is not None and idx < canonical_embeddings.shape[0]:
+                    sim = F.cosine_similarity(
+                        struct_emb, canonical_embeddings[idx].unsqueeze(0)
+                    ).item()
+                    result["similarity"] = f"{sim:.4f}"
+                results.append(result)
 
             return jsonify({"status": "success", "matches": results})
 

@@ -10,7 +10,6 @@ Usage:
     python train.py --data_dir data/casia --batch_size 256 --epochs 15
 """
 
-from src.augment import augment_stroke
 from src.dataset import CASIADataset, CachedDataset
 from src.preprocess import preprocess_stroke
 from src.loss import CombinedLoss
@@ -24,33 +23,6 @@ import argparse
 import glob
 from tqdm import tqdm
 import random
-
-
-def mixup_data(x, y, alpha=0.2, device='cuda'):
-    '''Returns mixed inputs, pairs of targets, and lambda'''
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-
-    batch_size = x.size(0)
-    index = torch.randperm(batch_size).to(device)
-
-    mixed_x = lam * x + (1 - lam) * x[index, :]
-    y_a, y_b = y, y[index]
-    return mixed_x, y_a, y_b, lam
-
-
-def mixup_criterion(criterion, pred, y_a, y_b, lam, struct_pred, struct_target):
-    # This is tricky with combined loss.
-    # struct_target also needs mixing?
-    # For now, let's just mix classification targets.
-    # We will call criterion twice? No.
-    # Let's manually interpolate the loss.
-    # But criterion returns dict.
-
-    # Actually, simpler to just modify the criterion or handling loop.
-    return None  # Placeholder, will handle in loop.
 
 
 # Enable TensorFloat-32 for RTX 4000 series
@@ -76,8 +48,8 @@ def set_seed(seed=42):
 
 
 # --- Configuration Constants ---
-TRAIN_DIRS = ["Pot1.0Train", "Pot1.2Train"]
-TEST_DIRS = ["Pot1.0Test", "Pot1.2Test"]
+TRAIN_DIRS = ["Pot1.0Train", "Pot1.1Train"]
+TEST_DIRS = ["Pot1.0Test", "Pot1.1Test"]
 
 
 def load_cached_datasets(cache_dir, augment_train=False):
@@ -299,8 +271,21 @@ def train(args):
     ) if test_dataset else None
 
     # 6. Model & Optimization
+    # Infer input_dim from checkpoint when resuming for backward compat
+    input_dim = 8  # default for new training
+    resume_state = None
+    if args.resume:
+        resume_path = args.resume if isinstance(
+            args.resume, str) else "models/best_model.pth"
+        if os.path.exists(resume_path):
+            print(f"Resuming training from {resume_path}...")
+            resume_state = torch.load(resume_path, map_location=device)
+            if 'start_conv.weight' in resume_state:
+                input_dim = resume_state['start_conv.weight'].shape[1]
+
     model = HandwritingModel(num_classes=NUM_CLASSES,
-                             hidden_dim=args.hidden_dim, dropout=0.3)
+                             hidden_dim=args.hidden_dim, dropout=0.15,
+                             input_dim=input_dim)
     criterion = CombinedLoss(lambda_struct=args.lambda_struct)
 
     # Optim: AdamW
@@ -314,9 +299,14 @@ def train(args):
     use_amp = (device.type == 'cuda')
     scaler = GradScaler(enabled=use_amp)
 
-    # Scheduler: Reduce LR on plateau (Safer than restarts for convergence)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
+    # Scheduler: Linear warmup (3 epochs) + cosine annealing
+    warmup_epochs = 3
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        progress = (epoch - warmup_epochs) / max(1, EPOCHS - warmup_epochs)
+        return 0.5 * (1.0 + np.cos(np.pi * progress))
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Save initialization for Lottery Ticket Rewinding
     if not args.resume:  # Only save init if starting fresh
@@ -325,30 +315,24 @@ def train(args):
 
     best_acc = 0.0
 
-    if args.resume:
-        resume_path = args.resume if isinstance(
-            args.resume, str) else "models/best_model.pth"
-        if os.path.exists(resume_path):
-            print(f"Resuming training from {resume_path}...")
-            state_dict = torch.load(resume_path, map_location=device)
+    if resume_state is not None:
+        # Pruning Detection: Apply identity masks if loading a sparse model
+        for key in resume_state.keys():
+            if 'weight_mask' in key:
+                layer_name = key.replace('.weight_mask', '')
+                module = model
+                for part in layer_name.split('.'):
+                    module = getattr(module, part)
 
-            # Pruning Detection: Apply identity masks if loading a sparse model
-            for key in state_dict.keys():
-                if 'weight_mask' in key:
-                    layer_name = key.replace('.weight_mask', '')
-                    module = model
-                    for part in layer_name.split('.'):
-                        module = getattr(module, part)
+                import torch.nn.utils.prune as prune
+                prune.identity(module, 'weight')
+                print(
+                    f"  [Resume] Applied pruning structure to {layer_name}")
 
-                    import torch.nn.utils.prune as prune
-                    prune.identity(module, 'weight')
-                    print(
-                        f"  [Resume] Applied pruning structure to {layer_name}")
-
-            model.load_state_dict(state_dict)
-        else:
-            print(
-                f"Warning: Resume file {resume_path} not found. Starting from scratch.")
+        model.load_state_dict(resume_state)
+    elif args.resume:
+        print(
+            f"Warning: Resume file not found. Starting from scratch.")
 
     # 8. Canonical Embeddings (Stage 2 Support)
     # Check for Canonical Embeddings
@@ -363,7 +347,7 @@ def train(args):
                 f"Warning: Canvas mismatch ({canonical_emb.shape[0]} vs {NUM_CLASSES}). Fallback to random.")
             canonical_emb = None
     else:
-        print("Note: 'models/canonical_embeddings.pt' not found. Using random noise for Structural Loss (Stage 1).")
+        print("Note: 'models/canonical_embeddings.pt' not found. Structural Loss will be DISABLED for this run (Stage 1).")
 
     history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
 
@@ -390,69 +374,27 @@ def train(args):
                 raise ValueError(
                     "CRITICAL: Training halted due to invalid labels.")
 
-            # AMP / Standard Context
-            if device.type == 'cuda':
-                ctx = autocast('cuda', enabled=True)
-            else:
-                ctx = torch.autocast(device_type=device.type, enabled=False) if hasattr(
-                    torch, 'autocast') else torch.no_grad()
+            struct_target = canonical_emb[labels] if canonical_emb is not None else None
 
             if use_amp:
                 with autocast('cuda'):
-                    # MixUp Logic
-                    # Turn off MixUp in last 5 epochs
-                    use_mixup = (epoch < EPOCHS - 5)
-                    if use_mixup:
-                        inputs, targets_a, targets_b, lam = mixup_data(
-                            features, labels, alpha=0.2, device=device)
-                        char_logits, struct_pred = model(inputs)
-
-                        # Handle Structural Target (also mix?)
-                        # Standard MixUp only mixes labels (CrossEntropy).
-                        # For Structural (Cosine), we can mix the target embeddings if we have them.
-                        struct_target_a = canonical_emb[targets_a] if canonical_emb is not None else torch.randn_like(
-                            struct_pred)
-                        struct_target_b = canonical_emb[targets_b] if canonical_emb is not None else torch.randn_like(
-                            struct_pred)
-
-                        # Compute Loss for both
-                        loss_a, _ = criterion(
-                            char_logits, targets_a, struct_pred, struct_target_a)
-                        loss_b, _ = criterion(
-                            char_logits, targets_b, struct_pred, struct_target_b)
-                        loss = lam * loss_a + (1 - lam) * loss_b
-                    else:
-                        char_logits, struct_pred = model(features)
-                        if canonical_emb is not None:
-                            struct_target = canonical_emb[labels]
-                        else:
-                            struct_target = torch.randn_like(struct_pred)
-                        loss, loss_dict = criterion(
-                            char_logits, labels, struct_pred, struct_target)
+                    char_logits, struct_pred = model(features, labels)
+                    loss, loss_dict = criterion(
+                        char_logits, labels, struct_pred, struct_target)
 
                 scaler.scale(loss).backward()
-                # Gradient Clipping
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=1.0)
-
+                    model.parameters(), max_norm=5.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                # CPU/MPS Path (Simplified without MixUp for now or same logic)
-                # Let's apply MixUp here too for consistency if needed, but primarily User uses 4070Ti (AMP)
-                char_logits, struct_pred = model(features)
-
-                if canonical_emb is not None:
-                    struct_target = canonical_emb[labels]
-                else:
-                    struct_target = torch.randn_like(struct_pred)
-
+                char_logits, struct_pred = model(features, labels)
                 loss, loss_dict = criterion(
                     char_logits, labels, struct_pred, struct_target)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=1.0)
+                    model.parameters(), max_norm=5.0)
                 optimizer.step()
 
             total_loss += loss.item()
@@ -478,7 +420,7 @@ def train(args):
                     if canonical_emb is not None:
                         struct_target = canonical_emb[labels]
                     else:
-                        struct_target = torch.randn_like(struct_pred)
+                        struct_target = None
 
                     loss, _ = criterion(char_logits, labels,
                                         struct_pred, struct_target)
@@ -493,11 +435,7 @@ def train(args):
             print(
                 f"Epoch {epoch+1} Test Loss: {avg_test_loss:.4f} | Acc: {current_acc:.2f}%")
 
-            print(
-                f"Epoch {epoch+1} Test Loss: {avg_test_loss:.4f} | Acc: {current_acc:.2f}%")
-
-            # scheduler.step() for ReduceLROnPlateau needs a metric
-            scheduler.step(avg_test_loss)
+            scheduler.step()
             history['val_loss'].append(avg_test_loss)
             history['val_acc'].append(current_acc)
 
