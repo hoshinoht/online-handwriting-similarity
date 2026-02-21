@@ -10,7 +10,7 @@ class ResidualBlock(nn.Module):
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=kernel_size//2)
         self.bn2 = nn.BatchNorm1d(out_channels)
         self.dropout = nn.Dropout(dropout)
-        
+
         self.shortcut = nn.Sequential()
         if in_channels != out_channels:
             self.shortcut = nn.Conv1d(in_channels, out_channels, 1)
@@ -31,7 +31,7 @@ class Attention(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, 1)
         )
-        
+
     def forward(self, x):
         # x: (B, L, hidden_dim)
         # weights: (B, L, 1)
@@ -39,6 +39,16 @@ class Attention(nn.Module):
         # pooled: (B, hidden_dim)
         pooled = torch.sum(x * weights, dim=1)
         return pooled, weights
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=256):
+        super().__init__()
+        self.pos_embedding = nn.Embedding(max_len, d_model)
+
+    def forward(self, x):
+        # x: (B, L, d_model)
+        positions = torch.arange(x.size(1), device=x.device)
+        return x + self.pos_embedding(positions)
 
 class ArcFaceHead(nn.Module):
     def __init__(self, in_features, num_classes, s=30.0, m=0.5):
@@ -63,8 +73,10 @@ class ArcFaceHead(nn.Module):
 
 
 class HandwritingModel(nn.Module):
-    def __init__(self, num_classes, input_dim=8, hidden_dim=256, struct_dim=128, dropout=0.15):
+    def __init__(self, num_classes, input_dim=8, hidden_dim=256, struct_dim=128,
+                 dropout=0.15, arch='transformer', nhead=4, num_layers=4):
         super(HandwritingModel, self).__init__()
+        self.arch = arch
 
         # 1. ResNet-1D Backbone
         self.start_conv = nn.Conv1d(input_dim, 64, kernel_size=3, padding=1)
@@ -74,16 +86,30 @@ class HandwritingModel(nn.Module):
         self.layer2 = ResidualBlock(128, 256, dropout=dropout)
         self.layer3 = ResidualBlock(256, hidden_dim, dropout=dropout)
 
-        # 2. Bidirectional GRU
-        self.gru = nn.GRU(hidden_dim, hidden_dim, num_layers=2,
-                          batch_first=True, bidirectional=True, dropout=dropout)
+        if arch == 'gru':
+            # 2a. Bidirectional GRU (legacy)
+            self.gru = nn.GRU(hidden_dim, hidden_dim, num_layers=2,
+                              batch_first=True, bidirectional=True, dropout=dropout)
+            seq_out_dim = hidden_dim * 2
+        else:
+            # 2b. Transformer Encoder
+            self.pos_enc = PositionalEncoding(hidden_dim)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim, nhead=nhead,
+                dim_feedforward=hidden_dim * 2,
+                dropout=dropout, batch_first=True
+            )
+            self.transformer_encoder = nn.TransformerEncoder(
+                encoder_layer, num_layers=num_layers
+            )
+            seq_out_dim = hidden_dim
 
         # 3. Attention
-        self.attention = Attention(hidden_dim * 2)
+        self.attention = Attention(seq_out_dim)
 
         # 4. Classification Head (ArcFace)
         self.fc_proj = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(seq_out_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
@@ -91,7 +117,7 @@ class HandwritingModel(nn.Module):
 
         # 5. Structural Similarity Head
         self.fc_struct = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(seq_out_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, struct_dim)
         )
@@ -105,9 +131,13 @@ class HandwritingModel(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
 
-        # GRU
+        # Sequence modeling
         x = x.permute(0, 2, 1)
-        out, _ = self.gru(x)
+        if self.arch == 'gru':
+            out, _ = self.gru(x)
+        else:
+            x = self.pos_enc(x)
+            out = self.transformer_encoder(x)
 
         # Attention Pooling
         embedding, attn_weights = self.attention(out)

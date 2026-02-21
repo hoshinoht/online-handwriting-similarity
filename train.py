@@ -283,9 +283,13 @@ def train(args):
             if 'start_conv.weight' in resume_state:
                 input_dim = resume_state['start_conv.weight'].shape[1]
 
+    arch = 'transformer'  # default for fresh training
+    if resume_state is not None:
+        arch = 'transformer' if any(k.startswith('transformer_encoder.') for k in resume_state) else 'gru'
+
     model = HandwritingModel(num_classes=NUM_CLASSES,
                              hidden_dim=args.hidden_dim, dropout=0.15,
-                             input_dim=input_dim)
+                             input_dim=input_dim, arch=arch)
     criterion = CombinedLoss(lambda_struct=args.lambda_struct)
 
     # Optim: AdamW
@@ -317,17 +321,18 @@ def train(args):
 
     if resume_state is not None:
         # Pruning Detection: Apply identity masks if loading a sparse model
+        import torch.nn.utils.prune as prune
         for key in resume_state.keys():
-            if 'weight_mask' in key:
-                layer_name = key.replace('.weight_mask', '')
+            if key.endswith('_mask'):
+                parts = key.rsplit('.', 1)
+                layer_name, mask_name = parts[0], parts[1]
+                param_name = mask_name.replace('_mask', '')
                 module = model
                 for part in layer_name.split('.'):
                     module = getattr(module, part)
-
-                import torch.nn.utils.prune as prune
-                prune.identity(module, 'weight')
+                prune.identity(module, param_name)
                 print(
-                    f"  [Resume] Applied pruning structure to {layer_name}")
+                    f"  [Resume] Applied pruning structure to {layer_name}.{param_name}")
 
         model.load_state_dict(resume_state)
     elif args.resume:

@@ -215,3 +215,8 @@ training_history.png
 input/
 demo/static/preprocess.js.map
 
+
+
+**/.claude/
+**/.vscode/
+CLAUDE.md

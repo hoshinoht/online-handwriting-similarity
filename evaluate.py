@@ -12,12 +12,12 @@ from src.dataset import CASIADataset, CachedDataset
 # Directories dependent on the user's data structure
 train_directories = [
   "Pot1.0Train",
-  "Pot1.2Train",
+  "Pot1.1Train",
 ]
 
 test_directories = [
   "Pot1.0Test",
-  "Pot1.2Test",
+  "Pot1.1Test",
 ]
 
 def load_cached_test(cache_dir):
@@ -130,21 +130,22 @@ def evaluate(args):
         # 2. Build Mapping
         num_classes = build_tag_mapping(train_ds, test_ds)
     
-    # 3. Model
-    model = HandwritingModel(num_classes=num_classes)
-    
-    # 4. Load Weights
-    if os.path.exists(args.model_path):
-        print(f"Loading model from {args.model_path}...")
-        try:
-            state_dict = torch.load(args.model_path, map_location=device)
-            model.load_state_dict(state_dict)
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            print("Tip: Ensure the model was saved with 'torch.save(model.state_dict(), ...)'")
-            return
-    else:
+    # 3. Model — detect arch from checkpoint
+    if not os.path.exists(args.model_path):
         print(f"Error: Model file {args.model_path} not found.")
+        return
+
+    # 4. Load Weights
+    print(f"Loading model from {args.model_path}...")
+    try:
+        state_dict = torch.load(args.model_path, map_location=device)
+        input_dim = state_dict['start_conv.weight'].shape[1] if 'start_conv.weight' in state_dict else 8
+        arch = 'transformer' if any(k.startswith('transformer_encoder.') for k in state_dict) else 'gru'
+        model = HandwritingModel(num_classes=num_classes, input_dim=input_dim, arch=arch)
+        model.load_state_dict(state_dict)
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Tip: Ensure the model was saved with 'torch.save(model.state_dict(), ...)'")
         return
 
     model.to(device)

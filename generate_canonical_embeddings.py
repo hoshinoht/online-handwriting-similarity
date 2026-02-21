@@ -116,7 +116,8 @@ def generate_canonical(args):
         print(f"Loading model weights from {model_path}...")
         state_dict = torch.load(model_path, map_location=device)
         input_dim = state_dict['start_conv.weight'].shape[1] if 'start_conv.weight' in state_dict else 8
-        model = HandwritingModel(num_classes=num_classes, input_dim=input_dim)
+        arch = 'transformer' if any(k.startswith('transformer_encoder.') for k in state_dict) else 'gru'
+        model = HandwritingModel(num_classes=num_classes, input_dim=input_dim, arch=arch)
         model.load_state_dict(state_dict)
     else:
         print(f"Error: Model {args.model_path} not found.")

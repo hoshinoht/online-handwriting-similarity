@@ -20,9 +20,9 @@ import subprocess
 from train import train
 from src.model import HandwritingModel
 
-def get_model(num_classes):
+def get_model(num_classes, arch='transformer'):
     """Factory method to instantiate the model structure."""
-    return HandwritingModel(num_classes=num_classes)
+    return HandwritingModel(num_classes=num_classes, arch=arch)
 
 def prune_model(model, amount=0.2):
     """
@@ -42,7 +42,10 @@ def prune_model(model, amount=0.2):
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Linear):
             parameters_to_prune.append((module, 'weight'))
-            
+        elif isinstance(module, torch.nn.MultiheadAttention):
+            parameters_to_prune.append((module, 'in_proj_weight'))
+            parameters_to_prune.append((module.out_proj, 'weight'))
+
     # Apply global L1 unstructured pruning
     prune.global_unstructured(
         parameters_to_prune,
@@ -57,6 +60,11 @@ def prune_model(model, amount=0.2):
         if isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Linear):
             total_zeros += torch.sum(module.weight == 0)
             total_params += module.weight.nelement()
+        elif isinstance(module, torch.nn.MultiheadAttention):
+            total_zeros += torch.sum(module.in_proj_weight == 0)
+            total_params += module.in_proj_weight.nelement()
+            total_zeros += torch.sum(module.out_proj.weight == 0)
+            total_params += module.out_proj.weight.nelement()
             
     print(f"    Global Sparsity: {100. * total_zeros / total_params:.2f}%")
     return model
@@ -70,6 +78,11 @@ def make_pruning_permanent(model):
         if isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Linear):
             if hasattr(module, 'weight_orig'):
                 prune.remove(module, 'weight')
+        elif isinstance(module, torch.nn.MultiheadAttention):
+            if hasattr(module, 'in_proj_weight_orig'):
+                prune.remove(module, 'in_proj_weight')
+            if hasattr(module.out_proj, 'weight_orig'):
+                prune.remove(module.out_proj, 'weight')
     return model
 
 def rewind_weights(model, init_state_dict):
@@ -92,15 +105,27 @@ def rewind_weights(model, init_state_dict):
                         module.weight_orig.copy_(init_state_dict[f"{name}.weight"])
                     else:
                         print(f"Warning: {name}.weight not found in init_state_dict.")
-                
+
                 # Scenario 2: Unpruned layer in a module list (if any)
-                else: 
+                else:
                      if f"{name}.weight" in init_state_dict:
                          module.weight.copy_(init_state_dict[f"{name}.weight"])
-                        
+
                 # Rewind Bias
                 if module.bias is not None and f"{name}.bias" in init_state_dict:
                     module.bias.copy_(init_state_dict[f"{name}.bias"])
+
+            elif isinstance(module, torch.nn.MultiheadAttention):
+                # in_proj_weight
+                key = f"{name}.in_proj_weight"
+                if hasattr(module, "in_proj_weight_orig"):
+                    if key in init_state_dict:
+                        module.in_proj_weight_orig.copy_(init_state_dict[key])
+                elif key in init_state_dict:
+                    module.in_proj_weight.copy_(init_state_dict[key])
+                # in_proj_bias
+                if module.in_proj_bias is not None and f"{name}.in_proj_bias" in init_state_dict:
+                    module.in_proj_bias.copy_(init_state_dict[f"{name}.in_proj_bias"])
                     
         # Rewind other parameters (e.g. BatchNorm, GRU non-weight params)
         for name, param in model.named_parameters():
@@ -132,11 +157,12 @@ def run_lottery(args):
         map_path = os.path.join(args.data_dir, 'class_map.pt')
         
     tag_map = torch.load(map_path)
-    model = get_model(len(tag_map))
-    
+
     # 2. Load the Reference Model (The Teacher/Baseline)
     print("Loading best model to identify winning tickets...")
     best_state = torch.load("models/best_model.pth", map_location='cpu')
+    arch = 'transformer' if any(k.startswith('transformer_encoder.') for k in best_state) else 'gru'
+    model = get_model(len(tag_map), arch=arch)
     model.load_state_dict(best_state)
     
     # 3. Load Initialization (For Rewinding)
@@ -175,21 +201,25 @@ def run_lottery(args):
         # to use as the base for the next level of pruning.
         print(f"Round {round_idx+1} complete. Loading best model for next round...")
         
-        model = get_model(len(tag_map)) 
-        
         # Ensure model has correct structure before loading sparse dict
         # We re-apply identity masks to all pruned layers
         best_path = "models/best_model.pth"
         if os.path.exists(best_path):
              state_dict = torch.load(best_path, map_location='cpu')
-             
+             round_arch = 'transformer' if any(k.startswith('transformer_encoder.') for k in state_dict) else 'gru'
+             model = get_model(len(tag_map), arch=round_arch)
+
              for key in state_dict.keys():
-                 if 'weight_mask' in key:
-                     layer_name = key.replace('.weight_mask', '')
+                 if key.endswith('_mask'):
+                     # e.g. 'layer.weight_mask' → param='weight', path='layer'
+                     # e.g. 'layer.in_proj_weight_mask' → param='in_proj_weight', path='layer'
+                     parts = key.rsplit('.', 1)
+                     layer_name, mask_name = parts[0], parts[1]
+                     param_name = mask_name.replace('_mask', '')
                      module = model
                      for part in layer_name.split('.'):
                          module = getattr(module, part)
-                     prune.identity(module, 'weight')
+                     prune.identity(module, param_name)
              
              model.load_state_dict(state_dict)
         else:

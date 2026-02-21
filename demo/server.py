@@ -111,24 +111,27 @@ def load_resources():
     else:
         print("Warning: Canonical Embeddings not found. Search will fail.")
 
-    # Load Model — infer input_dim from checkpoint for backward compat
+    # Load Model — infer input_dim and arch from checkpoint for backward compat
     input_dim = 8  # default
     if state is not None and 'start_conv.weight' in state:
         input_dim = state['start_conv.weight'].shape[1]
-    model = HandwritingModel(num_classes=num_classes, input_dim=input_dim)
+    arch = 'transformer' if state and any(k.startswith('transformer_encoder.') for k in state) else 'gru'
+    model = HandwritingModel(num_classes=num_classes, input_dim=input_dim, arch=arch)
     if state is None and os.path.exists(MODEL_PATH):
         state = torch.load(MODEL_PATH, map_location=device)
 
     if state is not None:
         # Pruning check
+        import torch.nn.utils.prune as prune
         for key in state.keys():
-            if 'weight_mask' in key:
-                layer_name = key.replace('.weight_mask', '')
+            if key.endswith('_mask'):
+                parts = key.rsplit('.', 1)
+                layer_name, mask_name = parts[0], parts[1]
+                param_name = mask_name.replace('_mask', '')
                 module = model
                 for part in layer_name.split('.'):
                     module = getattr(module, part)
-                import torch.nn.utils.prune as prune
-                prune.identity(module, 'weight')
+                prune.identity(module, param_name)
 
         model.load_state_dict(state)
         model.to(device)
